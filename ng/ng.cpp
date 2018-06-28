@@ -18,25 +18,56 @@ public:
 	}
 };
 
-class type_validator : public validator
+class basic_validator : public validator
 {
-	json::value_t type_;
+	std::pair<bool, json> enum_;
+	std::pair<bool, json> const_;
 
 protected:
 	void operator()(const json &instance) const override
 	{
-		if (instance.type() != type_)
+//		if (instance.type() != type_)
+//			return;
+
+		if (enum_.first) {
+			bool seen_in_enum = false;
+			for (auto &e : enum_.second)
+				if (instance == e) {
+					seen_in_enum = true;
+					break;
+				}
+
+			if (!seen_in_enum)
+				return;
+		}
+
+		if (const_.first &&
+		    const_.second != instance)
 			return;
 	}
 
 public:
-	type_validator(json::value_t t)
-	    : type_(t) {}
+	basic_validator(const json &schema)
+	{
+		auto attr = schema.find("type");
+		// type
+
+		attr = schema.find("enum");
+		if (attr != schema.end())
+			enum_ = {true, attr.value()};
+
+		attr = schema.find("const");
+		if (attr != schema.end())
+			const_ = {true, attr.value()};
+
+
+
+	}
 };
 
 validator *createValidator(const json &schema);
 
-class string_validator : public type_validator
+class string_validator : public basic_validator
 {
 	std::pair<bool, size_t> maxLength_{false, 0};
 	std::pair<bool, size_t> minLength_{false, 0};
@@ -60,7 +91,7 @@ class string_validator : public type_validator
 
 	void operator()(const json &instance) const override
 	{
-		type_validator::operator()(instance);
+		basic_validator::operator()(instance);
 
 		if (minLength_.first) {
 			if (utf8_length(instance) < minLength_.second) {
@@ -95,7 +126,7 @@ class string_validator : public type_validator
 
 public:
 	string_validator(const json &schema)
-	    : type_validator(json::value_t::string)
+	    : basic_validator(schema)
 	{
 		auto v = schema.find("maxLength");
 		if (v != schema.end())
@@ -184,18 +215,18 @@ public:
 	}
 };
 
-class null_validator : public type_validator
+class null_validator : public basic_validator
 {
 public:
-	null_validator()
-	    : type_validator(json::value_t::null) {}
+	null_validator(const json &schema)
+	    : basic_validator(schema) {}
 };
 
-class boolean_validator : public type_validator
+class boolean_validator : public basic_validator
 {
 public:
-	boolean_validator()
-	    : type_validator(json::value_t::boolean) {}
+	boolean_validator(const json &schema)
+	    : basic_validator(schema) {}
 };
 
 class required_validator : public validator
@@ -247,7 +278,7 @@ public:
 	}
 };
 
-class object_validator : public type_validator
+class object_validator : public basic_validator
 {
 	std::pair<bool, size_t> maxProperties_{false, 0};
 	std::pair<bool, size_t> minProperties_{false, 0};
@@ -261,9 +292,11 @@ class object_validator : public type_validator
 
 	std::map<std::string, dependencies_validator> dependencies_;
 
+	validator *propertyNames_ = nullptr;
+
 public:
 	object_validator(const json &schema)
-	    : type_validator(json::value_t::string)
+	    : basic_validator(schema)
 	{
 		auto attr = schema.find("maxProperties");
 		if (attr != schema.end())
@@ -305,11 +338,15 @@ public:
 		if (attr != schema.end())
 			for (auto &dep : attr.value().items())
 				dependencies_.emplace(std::make_pair(dep.key(), dependencies_validator(dep.value())));
+
+		attr = schema.find("propertyNames");
+		if (attr != schema.end())
+			propertyNames_ = createValidator(attr.value());
 	}
 
 	void operator()(const json &instance) const override
 	{
-		type_validator::operator()(instance);
+		basic_validator::operator()(instance);
 
 		if (maxProperties_.first && instance.size() > maxProperties_.second)
 			throw std::out_of_range("too many properties.");
@@ -344,7 +381,7 @@ public:
 	}
 };
 
-class array_validator : public type_validator
+class array_validator : public basic_validator
 {
 	std::pair<bool, size_t> maxItems_{false, 0};
 	std::pair<bool, size_t> minItems_{false, 0};
@@ -353,9 +390,11 @@ class array_validator : public type_validator
 	std::vector<validator *> items_;
 	validator *additionalItems_ = nullptr;
 
+	std::pair<bool, json> contains_;
+
 	void operator()(const json &instance) const override
 	{
-		type_validator::operator()(instance);
+		basic_validator::operator()(instance);
 
 		if (maxItems_.first && instance.size() > maxItems_.second)
 			throw std::out_of_range("has too many items.");
@@ -379,18 +418,22 @@ class array_validator : public type_validator
 			else
 				item_validator = *item;
 
-			if (item_validator)
+			if (!item_validator)
 				break;
 
 			(*item_validator)(i);
 
 			item++;
 		}
+
+		if (contains_.first &&
+			std::find(instance.begin(), instance.end(), contains_.second) == instance.end())
+			return;
 	}
 
 public:
 	array_validator(const json &schema)
-	    : type_validator(json::value_t::array)
+	    : basic_validator(schema)
 	{
 		auto attr = schema.find("maxItems");
 		if (attr != schema.end())
@@ -413,7 +456,9 @@ public:
 		if (attr != schema.end())
 			additionalItems_ = createValidator(attr.value());
 
-		// TODO contains
+		attr = schema.find("contains");
+		if (attr != schema.end())
+			contains_ = {true, attr.value()};
 	}
 };
 
@@ -429,7 +474,6 @@ class always_true_validator : public validator
 {
 	void operator()(const json &) const override {}
 };
-
 
 validator *createValidator(const json &schema)
 {
@@ -461,9 +505,9 @@ validator *createValidator(const json &schema)
 		if (type == "string")
 			return new string_validator(schema);
 		else if (type == "null")
-			return new null_validator;
+			return new null_validator(schema);
 		else if (type == "boolean")
-			return new boolean_validator;
+			return new boolean_validator(schema);
 		else if (type == "object")
 			return new object_validator(schema);
 		else if (type == "array")
